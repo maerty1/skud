@@ -1,0 +1,73 @@
+{
+  "server": {
+    "addr": "0.0.0.0",
+    "port": 8999
+  },
+  "web": {
+    "addr": "0.0.0.0",
+    "port": 8080,
+    "enabled": true
+  },
+  "http_service": {
+    "active": true,
+    "ip": "example-server.example.com",
+    "port": 80,
+    "name": "example-server.example.com",
+    "termlist_path": "/example/hs/ACS/terminals",
+    "ident_path": "/example/hs/ACS/checking",
+    "solar_path": "/example/hs/ACS/solarium",
+    "uid_path": "/example/hs/ACS/uid",
+    "url_fmt_suff": "example",
+    "request_extra_headers": [
+      "Authorization: Basic RXhhbXBsZVVzZXI6RXhhbXBsZVBhc3N3b3Jk"
+    ]
+  },
+  "timeouts": {
+    "service_request_expire_time": 5.0,
+    "session_expire_time": 300.0,
+    "terminal_connect_timeout": 10.0
+  },
+  "error_handling": {
+    "service_autofix_expired": false,
+    "service_link_err_msg": "Ошибка связи. Обратитесь на рецепцию.",
+    "http_request_retry_count": 2,
+    "http_request_retry_delay": 0.5
+  },
+  "messages": {
+    "service_err_msg": "Ошибка связи с БД",
+    "service_fixed_msg": "Проходите",
+    "service_denied_msg": "Доступ запрещен"
+  },
+  "jsp": {
+    "listener_port": false,
+    "dev_auto_ping_enabled": true
+  },
+  "camera": {
+    "result_msg_no": "Лицо не распознано",
+    "result_msg_nf": "НЕТ ФОТО !!! Обратитесь в отдел продаж",
+    "result_msg_fail": "Ошибка распознавания"
+  },
+  "terminal_list": {
+    "check_time": 60.0,
+    "filter": "/192\\.168\\.1\\.(10|20|30)/",
+    "filter_absent": false
+  },
+  "logging": {
+    "log_file": "log_bin.txt",
+    "log_file_screen": "log_screen.txt",
+    "log_file_low": "log_low.txt",
+    "log_file_err": "log_err.txt",
+    "rotation": {
+      "enabled": true,
+      "max_size": 10485760,
+      "max_files": 10,
+      "max_days": 30
+    }
+  },
+  "helios": {
+    "enabled": false,
+    "url": "ws://localhost:8081",
+    "timeout": 5.0
+  }
+}
+

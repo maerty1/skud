@@ -1,0 +1,57 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+# Binaries (but keep config files in bin/)
+bin/*.exe
+bin/*.dll
+bin/*.so
+bin/*.dylib
+bin/*.test
+bin/*.out
+bin/logs/
+bin/csv/
+dist/
+# But keep config files in bin/:
+!bin/config.json.example
+!bin/.env.example
+
+# Go specific
+*.mod.bak
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+*.txt
+
+# Environment files with sensitive data (exclude example files)
+.env
+.env.local
+.env.*.local
+config.local.json
+config.json
+# But keep example files:
+!.env.example
+!config.json.example
+!**/.env.example
+!**/config.json.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.a
+*.o
+

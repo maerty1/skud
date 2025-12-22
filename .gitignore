@@ -41,6 +41,7 @@ logs/
 .env.*.local
 config.local.json
 config.json
+config/config.json
 # But keep example files:
 !.env.example
 !config.json.example

@@ -18,7 +18,6 @@ bin/csv/
 dist/
 # But keep config files in bin/:
 !bin/config.json.example
-!bin/.env.example
 
 # Go specific
 *.mod.bak
@@ -35,17 +34,14 @@ logs/
 *.log
 *.txt
 
-# Environment files with sensitive data (exclude example files)
+# Local config (sensitive data)
 .env
 .env.local
-.env.*.local
 config.local.json
 config.json
 config/config.json
 # But keep example files:
-!.env.example
 !config.json.example
-!**/.env.example
 !**/config.json.example
 
 # OS

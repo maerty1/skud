@@ -14,6 +14,7 @@ import (
 // HTTPClientInterface defines HTTP client methods
 type HTTPClientInterface interface {
 	CheckAccess(uid string, terminalID string, tagType string, lockers []types.LockerInfo) (*types.KPOResult, string, error)
+	CheckSolarAccess(uid string, terminalID string, solarTime int, regQuery int) (*types.KPOResult, string, error)
 	SendAccessReport(uid string, terminalID string, result bool, message string) error
 	GetUserCID(uid string) (string, error)
 }
@@ -195,6 +196,59 @@ func (hc *HTTPClient) GetTerminalList() ([]map[string]interface{}, error) {
 // role: optional role parameter for craft format
 func (hc *HTTPClient) CheckAccess(uid string, terminalID string, tagType string, lockers []types.LockerInfo) (*types.KPOResult, string, error) {
 	return hc.CheckAccessWithRole(uid, terminalID, tagType, "", lockers)
+}
+
+// CheckSolarAccess checks solar (time-based) access via 1C
+// This sends request to solar_path instead of ident_path
+// Format: solar_path/id/uid/time/reg_query
+func (hc *HTTPClient) CheckSolarAccess(uid string, terminalID string, solarTime int, regQuery int) (*types.KPOResult, string, error) {
+	if hc.config.HTTPServiceSolarPath == "" {
+		return nil, "", fmt.Errorf("solar path not configured")
+	}
+
+	path := fmt.Sprintf("%s/%s/%s/%d/%d", hc.config.HTTPServiceSolarPath, terminalID, uid, solarTime, regQuery)
+
+	resp, err := hc.Request1C(path, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("solar access check failed: %v", err)
+	}
+
+	var result types.KPOResult
+	var message string
+
+	if resp.StatusCode == 500 {
+		result = types.KPO_RES_NO
+		message = hc.config.ServiceDeniedMsg
+	} else {
+		if resultVal, ok := resp.Data["RESULTVAL"].(float64); ok {
+			if int(resultVal) > 0 {
+				result = types.KPO_RES_YES
+			} else {
+				result = types.KPO_RES_NO
+			}
+			message = utils.GetStringValue(resp.Data, "MSGSTR", hc.config.ServiceFixedMsg)
+		} else if resultVal, ok := resp.Data["RESULT"].(float64); ok {
+			if int(resultVal) > 0 {
+				result = types.KPO_RES_YES
+			} else {
+				result = types.KPO_RES_NO
+			}
+			if msg, ok := resp.Data["MESSAGE"].(string); ok {
+				message = msg
+			} else {
+				message = hc.config.ServiceFixedMsg
+			}
+		} else {
+			result = types.KPO_RES_YES
+			message = hc.config.ServiceFixedMsg
+		}
+	}
+
+	if message == "" {
+		message = hc.config.ServiceFixedMsg
+	}
+
+	return &result, message, nil
 }
 
 // CheckAccessWithRole checks user access via 1C with optional role parameter

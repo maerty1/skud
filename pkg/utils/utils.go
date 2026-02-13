@@ -408,3 +408,15 @@ func FilterTerminalList(ip string, filter string, filterAbsent bool) bool {
 	// Include only matching terminals
 	return matched
 }
+
+// FixPhrase applies phrase corrections and converts ';' to newlines.
+// This is the Go equivalent of PHP's colon2nl() with $phrases_fixes.
+func FixPhrase(msg string, fixes map[string]string) string {
+	if fixes != nil {
+		if fixed, ok := fixes[msg]; ok {
+			msg = fixed
+		}
+	}
+	msg = strings.ReplaceAll(msg, ";", "\n")
+	return msg
+}

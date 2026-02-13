@@ -24,8 +24,9 @@ type ConnectionPool struct {
 	mutex         sync.RWMutex
 	config        *types.Config
 	// Event handlers
-	onTagRead   func(connKey, uid string, readerType uint8, auth bool)
-	onPassEvent func(connKey string, passed bool)
+	onTagRead     func(connKey, uid string, readerType uint8, auth bool)
+	onPassEvent   func(connKey string, passed bool)
+	onBarcodeRead func(connKey, data string)
 }
 
 // Connection represents a single connection
@@ -91,6 +92,11 @@ func NewConnectionPool(config *types.Config) *ConnectionPool {
 func (cp *ConnectionPool) SetEventHandlers(onTagRead func(string, string, uint8, bool), onPassEvent func(string, bool)) {
 	cp.onTagRead = onTagRead
 	cp.onPassEvent = onPassEvent
+}
+
+// SetBarcodeHandler sets barcode read event handler
+func (cp *ConnectionPool) SetBarcodeHandler(onBarcodeRead func(string, string)) {
+	cp.onBarcodeRead = onBarcodeRead
 }
 
 // StartClient starts client connection
@@ -523,6 +529,22 @@ func (cp *ConnectionPool) IdleProc() {
 	cp.mutex.Unlock()
 }
 
+// DropConnection closes and removes a specific connection by key
+func (cp *ConnectionPool) DropConnection(key string) {
+	cp.mutex.Lock()
+	defer cp.mutex.Unlock()
+
+	if conn, exists := cp.connections[key]; exists {
+		if conn.Conn != nil {
+			conn.Conn.Close()
+		}
+		delete(cp.connections, key)
+	}
+
+	// Also remove from reconnections
+	delete(cp.reconnections, key)
+}
+
 // Close closes all connections and listeners
 func (cp *ConnectionPool) Close() {
 	cp.mutex.Lock()
@@ -624,6 +646,8 @@ func (cp *ConnectionPool) handlePocketPacket(conn *Connection, data []byte) {
 		cp.handlePocketTagRead(conn, packet)
 	case 0x03: // ReadTagExtended (with lockers)
 		cp.handlePocketTagReadExtended(conn, packet)
+	case 0x08: // Signal (USART data, e.g. barcode scanner)
+		cp.handlePocketSignal(conn, packet)
 	case 0x16: // InputChanged
 		cp.handlePocketInputChanged(conn, packet)
 	case 0x15: // RelayControlEx response
@@ -712,6 +736,99 @@ func (cp *ConnectionPool) handlePocketTagReadExtended(conn *Connection, packet *
 	// For now, use readerType 0 for extended read
 	if cp.onTagRead != nil {
 		cp.onTagRead(conn.Key, uid, 0, auth)
+	}
+}
+
+// handlePocketSignal handles Signal command (0x08) - USART data (barcode scanner)
+func (cp *ConnectionPool) handlePocketSignal(conn *Connection, packet *types.Packet) {
+	// Signal packet carries raw USART data in payload
+	// The barcode scanner sends: STX(0x02) + data + ETX(0x03) + EOT(0x04)
+	raw := packet.Payload
+
+	// Initialize USART buffer for this connection if needed
+	if conn.Settings == nil {
+		conn.Settings = &types.TerminalSettings{}
+	}
+	if conn.Settings.Extra == nil {
+		conn.Settings.Extra = make(map[string]interface{})
+	}
+
+	// Append to USART buffer
+	usartBuf, _ := conn.Settings.Extra["usart_buf"].(string)
+	usartBuf += raw
+	conn.Settings.Extra["usart_buf"] = usartBuf
+
+	// Try to parse complete barcode frames from buffer
+	cp.parseBarcodeStream(conn)
+}
+
+// parseBarcodeStream parses barcode frames from USART buffer
+// Frame format: STX(0x02) + data + ETX(0x03) + EOT(0x04)
+func (cp *ConnectionPool) parseBarcodeStream(conn *Connection) {
+	usartBuf, _ := conn.Settings.Extra["usart_buf"].(string)
+	buf := []byte(usartBuf)
+
+	for {
+		// Find STX (0x02)
+		start := -1
+		for i, b := range buf {
+			if b == 0x02 {
+				start = i
+				break
+			}
+		}
+		if start == -1 {
+			break
+		}
+
+		// Find ETX+EOT (0x03 0x04) after STX
+		end := -1
+		for i := start + 1; i < len(buf)-1; i++ {
+			if buf[i] == 0x03 && buf[i+1] == 0x04 {
+				end = i
+				break
+			}
+		}
+		if end == -1 {
+			break // Incomplete frame, wait for more data
+		}
+
+		// Extract barcode data between STX and ETX
+		data := string(buf[start+1 : end])
+		buf = buf[end+2:]
+
+		if len(data) > 0 {
+			cp.processBarcodeData(conn, data)
+		}
+	}
+
+	conn.Settings.Extra["usart_buf"] = string(buf)
+}
+
+// processBarcodeData processes parsed barcode data
+// Format: ]<type><subtype><data>
+func (cp *ConnectionPool) processBarcodeData(conn *Connection, rawData string) {
+	fmt.Printf("Barcode data from %s: %q\n", conn.Key, rawData)
+
+	// Validate barcode format: must start with ']' and be at least 4 chars
+	if len(rawData) < 4 || rawData[0] != ']' {
+		fmt.Printf("Invalid barcode format from %s: too short or no ] prefix\n", conn.Key)
+		return
+	}
+
+	// Validate total length (4-32 chars)
+	if len(rawData) > 32 {
+		fmt.Printf("Invalid barcode format from %s: too long (%d)\n", conn.Key, len(rawData))
+		return
+	}
+
+	// Extract data (skip ] prefix, type byte, subtype byte)
+	barcodeData := rawData[3:]
+
+	fmt.Printf("Barcode parsed from %s: data=%s\n", conn.Key, barcodeData)
+
+	if cp.onBarcodeRead != nil {
+		cp.onBarcodeRead(conn.Key, barcodeData)
 	}
 }
 
@@ -823,9 +940,33 @@ func (cp *ConnectionPool) handleGatCardIdent(conn *Connection, packet *types.Pac
 	}
 
 	readerType, _ := packet.Data["reader_type"].(uint8)
+	terminalType, _ := packet.Data["terminal_type"].(uint8)
 
-	fmt.Printf("GAT Card ident: key=%s, uid=%s, reader_type=%d\n",
-		conn.Key, uidHex, readerType)
+	fmt.Printf("GAT Card ident: key=%s, uid=%s, reader_type=%d, terminal_type=%d\n",
+		conn.Key, uidHex, readerType, terminalType)
+
+	// Store GAT-specific data (solar time, price, etc.) in connection extra
+	if terminalType == gat.GAT_TTYPE_TIME {
+		if conn.Settings == nil {
+			conn.Settings = &types.TerminalSettings{}
+		}
+		if conn.Settings.Extra == nil {
+			conn.Settings.Extra = make(map[string]interface{})
+		}
+		conn.Settings.Extra["gat_terminal_type"] = terminalType
+		if solarTime, ok := packet.Data["time"].(uint16); ok {
+			conn.Settings.Extra["gat_solar_time"] = int(solarTime)
+		}
+		if price, ok := packet.Data["price"].(uint32); ok {
+			conn.Settings.Extra["gat_solar_price"] = int(price)
+		}
+		if vendor, ok := packet.Data["vendor"].(uint32); ok {
+			conn.Settings.Extra["gat_solar_vendor"] = int(vendor)
+		}
+		if ares, ok := packet.Data["access_result"].(uint8); ok {
+			conn.Settings.Extra["gat_access_result"] = int(ares)
+		}
+	}
 
 	// Call event handler
 	if cp.onTagRead != nil {

@@ -45,6 +45,7 @@ type ConnectionPoolInterface interface {
 // HTTPClientInterface defines HTTP client methods
 type HTTPClientInterface interface {
 	CheckAccess(uid string, terminalID string, tagType string, lockers []types.LockerInfo) (*types.KPOResult, string, error)
+	CheckSolarAccess(uid string, terminalID string, solarTime int, regQuery int) (*types.KPOResult, string, error)
 	SendAccessReport(uid string, terminalID string, result bool, message string) error
 	GetUserCID(uid string) (string, error)
 }
@@ -140,6 +141,9 @@ func (sm *SessionManager) processKpoResult(session *types.Session) error {
 	if message == "" {
 		message = "Проходите" // Default allow message
 	}
+
+	// Apply phrase fixes (colon2nl equivalent)
+	message = utils.FixPhrase(message, sm.config.PhrasesFixes)
 
 	if result != types.KPO_RES_YES {
 		// Access denied
@@ -552,7 +556,28 @@ func (sm *SessionManager) sendKpoRequest(session *types.Session) (*types.Session
 				}
 			}
 
-			result, message, err := sm.httpClient.CheckAccess(session.UID, terminalID, "rfid", lockers)
+			// Determine tag type and check for solar (time-based) terminals
+			tagType := "rfid"
+			if dt, ok := session.Data["tag_type"].(string); ok && dt != "" {
+				tagType = dt
+			}
+
+			var result *types.KPOResult
+			var message string
+			var err error
+
+			// Check if this is a GAT Solar (TTYPE_TIME) terminal
+			if solarData, ok := session.Data["gat_solar"].(map[string]interface{}); ok {
+				solarTime, _ := solarData["time"].(int)
+				regQuery := 0
+				if rq, ok := solarData["reg_query"].(bool); ok && rq {
+					regQuery = 1
+				}
+				result, message, err = sm.httpClient.CheckSolarAccess(session.UID, terminalID, solarTime, regQuery)
+			} else {
+				result, message, err = sm.httpClient.CheckAccess(session.UID, terminalID, tagType, lockers)
+			}
+
 			if err != nil {
 				fmt.Printf("KPO request failed for session %s: %v\n", session.ID, err)
 

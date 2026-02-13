@@ -82,6 +82,28 @@ type ConfigFile struct {
 		URL     string  `json:"url"`
 		Timeout float64 `json:"timeout"`
 	} `json:"helios"`
+	PhrasesFixes map[string]string `json:"phrases_fixes"` // message corrections for terminal display
+	CRT          struct {
+		Active             bool              `json:"active"`
+		IdentificationMode bool              `json:"identification_mode"`
+		IP                 string            `json:"ip"`
+		Port               int               `json:"port"`
+		Name               string            `json:"name"`
+		URL                string            `json:"url"`
+		ConnectTime1       float64           `json:"connect_time1"`
+		ConnectTime2       float64           `json:"connect_time2"`
+		ConnectTime3       float64           `json:"connect_time3"`
+		ExpireTime         float64           `json:"expire_time"`
+		ExtraHeaders       []string          `json:"extra_headers"`
+		CheckTime          float64           `json:"check_time"`
+		BanCamPidTime      float64           `json:"ban_cam_pid_time"`
+		BanPassOnly        bool              `json:"ban_pass_only"`
+		BanFromCatch       bool              `json:"ban_from_catch"`
+		AutoFixMessage     bool              `json:"auto_fix_message"`
+		NoKpoPass          bool              `json:"no_kpo_pass"`
+		SeenTimeout        float64           `json:"seen_timeout"`
+		CamLinks           map[string]string `json:"cam_links"`
+	} `json:"crt"`
 }
 
 // LoadConfig loads configuration from file or creates default
@@ -364,6 +386,58 @@ func loadConfigFromFile(path string, cfg *types.Config) error {
 	// Note: Helios configuration may be stored differently in Config
 	// For now, skip if fields don't exist
 
+	// Phrase fixes
+	if len(fileCfg.PhrasesFixes) > 0 {
+		cfg.PhrasesFixes = fileCfg.PhrasesFixes
+	}
+
+	// CRT (Vizir)
+	cfg.CRTServiceActive = fileCfg.CRT.Active
+	cfg.CRTServiceIdentificationMode = fileCfg.CRT.IdentificationMode
+	if fileCfg.CRT.IP != "" {
+		cfg.CRTServiceIP = fileCfg.CRT.IP
+	}
+	if fileCfg.CRT.Port > 0 {
+		cfg.CRTServicePort = fileCfg.CRT.Port
+	}
+	if fileCfg.CRT.Name != "" {
+		cfg.CRTServiceName = fileCfg.CRT.Name
+	}
+	if fileCfg.CRT.URL != "" {
+		cfg.CRTServiceURL = fileCfg.CRT.URL
+	}
+	if fileCfg.CRT.ConnectTime1 > 0 {
+		cfg.CRTServiceConnectTime1 = fileCfg.CRT.ConnectTime1
+	}
+	if fileCfg.CRT.ConnectTime2 > 0 {
+		cfg.CRTServiceConnectTime2 = fileCfg.CRT.ConnectTime2
+	}
+	if fileCfg.CRT.ConnectTime3 > 0 {
+		cfg.CRTServiceConnectTime3 = fileCfg.CRT.ConnectTime3
+	}
+	if fileCfg.CRT.ExpireTime > 0 {
+		cfg.CRTServiceExpireTime = fileCfg.CRT.ExpireTime
+	}
+	if len(fileCfg.CRT.ExtraHeaders) > 0 {
+		cfg.CRTServiceExtraHeaders = fileCfg.CRT.ExtraHeaders
+	}
+	if fileCfg.CRT.CheckTime >= 0 {
+		cfg.CRTCheckTime = fileCfg.CRT.CheckTime
+	}
+	if fileCfg.CRT.BanCamPidTime > 0 {
+		cfg.CRTBanCamPidTime = fileCfg.CRT.BanCamPidTime
+	}
+	cfg.CRTBanPassOnly = fileCfg.CRT.BanPassOnly
+	cfg.CRTBanFromCatch = fileCfg.CRT.BanFromCatch
+	cfg.CRTAutoFixMessage = fileCfg.CRT.AutoFixMessage
+	cfg.CRTNoKpoPass = fileCfg.CRT.NoKpoPass
+	if fileCfg.CRT.SeenTimeout > 0 {
+		cfg.CRTSeenTimeout = fileCfg.CRT.SeenTimeout
+	}
+	if len(fileCfg.CRT.CamLinks) > 0 {
+		cfg.CRTCamLinks = fileCfg.CRT.CamLinks
+	}
+
 	return nil
 }
 
@@ -458,6 +532,29 @@ func SaveConfigExample(path string) error {
 	example.Helios.Enabled = false
 	example.Helios.URL = "ws://localhost:8081"
 	example.Helios.Timeout = 5.0
+	example.PhrasesFixes = map[string]string{
+		"Извините;клиент не идентифицирован;": "Извините;Клиент не;идентифицирован",
+		"Извините;Клиент уже в клубе;":       "Извините;Клиент;уже в клубе",
+	}
+	example.CRT.Active = false
+	example.CRT.IdentificationMode = true
+	example.CRT.IP = "192.168.0.20"
+	example.CRT.Port = 34015
+	example.CRT.Name = "192.168.0.20"
+	example.CRT.URL = "/vizir/v1/api/"
+	example.CRT.ConnectTime1 = 0.5
+	example.CRT.ConnectTime2 = 1.0
+	example.CRT.ConnectTime3 = 1.0
+	example.CRT.ExpireTime = 5.0
+	example.CRT.ExtraHeaders = []string{}
+	example.CRT.CheckTime = 0.0
+	example.CRT.BanCamPidTime = 5.0
+	example.CRT.BanPassOnly = true
+	example.CRT.BanFromCatch = false
+	example.CRT.AutoFixMessage = true
+	example.CRT.NoKpoPass = true
+	example.CRT.SeenTimeout = 10.0
+	example.CRT.CamLinks = map[string]string{}
 
 	data, err := json.MarshalIndent(example, "", "  ")
 	if err != nil {

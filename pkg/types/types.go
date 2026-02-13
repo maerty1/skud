@@ -279,6 +279,31 @@ type Config struct {
 	// JSP settings
 	JSPListenerPort       interface{} `json:"jsp_listener_port"` // false or int
 	JSPDevAutoPingEnabled bool        `json:"jsp_dev_autoping_enabled"`
+
+	// CRT (Vizir) settings
+	CRTServiceActive             bool              `json:"crt_service_active"`
+	CRTServiceIdentificationMode bool              `json:"crt_service_identification_mode"` // true=identification, false=verification
+	CRTServiceIP                 string            `json:"crt_service_ip"`
+	CRTServicePort               int               `json:"crt_service_port"`
+	CRTServiceName               string            `json:"crt_service_name"`
+	CRTServiceURL                string            `json:"crt_service_url"` // e.g. "/vizir/v1/api/"
+	CRTServiceConnectTime1       float64           `json:"crt_service_connect_time1"`
+	CRTServiceConnectTime2       float64           `json:"crt_service_connect_time2"`
+	CRTServiceConnectTime3       float64           `json:"crt_service_connect_time3"`
+	CRTServiceExpireTime         float64           `json:"crt_service_expire_time"`
+	CRTServiceExtraHeaders       []string          `json:"crt_service_extra_headers"`
+	CRTCheckTime                 float64           `json:"crt_check_time"`   // polling interval (0 = disabled)
+	CRTLastCheck                 time.Time         `json:"-"`                // runtime: last poll time
+	CRTBanCamPidTime             float64           `json:"crt_ban_cam_pid_time"`
+	CRTBanPassOnly               bool              `json:"crt_ban_pass_only"`
+	CRTBanFromCatch              bool              `json:"crt_ban_from_catch"`
+	CRTAutoFixMessage            bool              `json:"crt_auto_fix_message"`
+	CRTNoKpoPass                 bool              `json:"crt_no_kpo_pass"`
+	CRTSeenTimeout               float64           `json:"crt_seen_timeout"`
+	CRTCamLinks                  map[string]string `json:"crt_cam_links"` // camera_id -> terminal_id
+
+	// Phrase fixes: message correction before sending to terminal display
+	PhrasesFixes map[string]string `json:"phrases_fixes"` // original -> corrected
 }
 
 // Protocol Packet

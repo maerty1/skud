@@ -1,0 +1,54 @@
+---
+description: "Go code conventions for nd-go project"
+globs: "**/*.go"
+alwaysApply: false
+---
+
+# Go Conventions
+
+## Структура пакетов
+
+- `internal/` — приватные пакеты, не доступны извне модуля
+- `pkg/` — публичные пакеты (types, utils, protopack)
+- `cmd/` — точки входа (main.go)
+- `config/` — конфигурация
+
+## Паттерны
+
+### Новые пакеты в internal/
+При создании нового пакета:
+1. Определи структуру с `sync.RWMutex` если нужна конкурентность
+2. Создай конструктор `NewXxx(config *types.Config) *Xxx`
+3. Интегрируй в `daemon.go` — инстанцируй в `NewDaemonWithConfig`
+4. Если нужен API — добавь обработчики в `web_api.go`
+
+### Connection Pool
+- Ключ соединения: `"ip:port"` (строка)
+- Тип `Connection` определён в `connection/pool.go`, поля: `Key`, `Conn`, `Addr`, `Port`, `Settings`
+- `Settings` — `*types.TerminalSettings`, содержит `CTRole`, `Extra map[string]interface{}`
+- Для отправки данных используй `pool.Send(key, data)`
+
+### Сессии
+- `types.Session` — основная структура, `Data map[string]interface{}` для произвольных данных
+- Stage-based FSM: INIT → KPO_RESULT → CAM_RESULT → OPEN_FIRST → PASSED → DONE
+- `SessionManager.processKpoResult` обрабатывает ответ от 1С
+- `SessionManager.sendKpoRequest` отправляет запрос в 1С
+
+### HTTP Client
+- Методы: `CheckAccess`, `CheckSolarAccess`, `SendAccessReport`, `GetUserCID`
+- Retry-логика встроена
+- При добавлении нового метода — добавь в `HTTPClientInterface` в session/manager.go
+
+### Web API
+- RESTful JSON API, маршруты регистрируются в `daemon.setupWebAPI()`
+- Формат ответа: `map[string]interface{}` сериализуется в JSON
+- Аутентификация: нет (внутренняя сеть)
+
+## Типы терминалов
+
+| Тип | Константа | Описание |
+|-----|-----------|----------|
+| GAT | TTYPE_GAT | Считыватели карт GAT |
+| POCKET | TTYPE_POCKET | Pocket терминалы |
+| SPHINX | TTYPE_SPHINX | Sphinx терминалы |
+| JSP | TTYPE_JSP | JSP терминалы (relay/message) |

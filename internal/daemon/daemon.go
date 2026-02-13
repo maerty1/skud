@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"nd-go/config"
+	"nd-go/internal/cardlist"
 	"nd-go/internal/connection"
+	"nd-go/internal/crt"
 	"nd-go/internal/csvlogger"
+	"nd-go/internal/gtime"
 	"nd-go/internal/handler"
 	"nd-go/internal/helios"
 	"nd-go/internal/httpclient"
@@ -15,6 +18,7 @@ import (
 	"nd-go/internal/protocols/pocket"
 	"nd-go/internal/protocols/sphinx"
 	"nd-go/internal/session"
+	"nd-go/internal/termlogs"
 	"nd-go/pkg/types"
 	"nd-go/pkg/utils"
 	"net"
@@ -36,6 +40,10 @@ type Daemon struct {
 	handlers     *handler.HandlerManager
 	httpClient   *httpclient.HTTPClient
 	heliosClient *helios.HeliosClient
+	crtClient    *crt.CRTClient
+	cardList     *cardlist.CardList
+	gtimeLogger  *gtime.GTimeLogger
+	termLogs     *termlogs.TermLogs
 	sessionMgr   *session.SessionManager
 	csvLogger    *csvlogger.CSVLogger
 	running      bool
@@ -100,6 +108,26 @@ func NewDaemonWithConfig(configPath string, cmdArgs map[string]string) *Daemon {
 	})
 	fmt.Println("Helios client created")
 
+	fmt.Println("Creating CRT client...")
+	crtClient := crt.NewCRTClient(cfg)
+	fmt.Println("CRT client created")
+
+	fmt.Println("Creating term logs...")
+	termLogsStore := termlogs.NewTermLogs(cfg.LogEventCount)
+	fmt.Println("Term logs created")
+
+	fmt.Println("Creating GTime logger...")
+	gtimeLogger := gtime.NewGTimeLogger(cfg.LogFile+"_gtime/", gtime.DefaultKeys())
+	fmt.Println("GTime logger created")
+
+	fmt.Println("Creating card list...")
+	cardListMgr := cardlist.NewCardList()
+	cardListMgr.SetPersistFile("cardlist.json")
+	if err := cardListMgr.Load(); err != nil {
+		fmt.Printf("Warning: failed to load card list: %v\n", err)
+	}
+	fmt.Println("Card list created")
+
 	daemon := &Daemon{
 		config:       cfg,
 		pool:         pool,
@@ -107,6 +135,10 @@ func NewDaemonWithConfig(configPath string, cmdArgs map[string]string) *Daemon {
 		handlers:     handlers,
 		httpClient:   httpClient,
 		heliosClient: heliosClient,
+		crtClient:    crtClient,
+		cardList:     cardListMgr,
+		gtimeLogger:  gtimeLogger,
+		termLogs:     termLogsStore,
 		sessionMgr:   sessionMgr,
 		csvLogger:    csvLogger,
 		running:      false,
@@ -115,9 +147,23 @@ func NewDaemonWithConfig(configPath string, cmdArgs map[string]string) *Daemon {
 		eventCh:      make(chan map[string]interface{}, 100),
 	}
 
+	// Set event handlers for connection pool
+	pool.SetEventHandlers(daemon.ProcessTagRead, daemon.ProcessPassEvent)
+	pool.SetBarcodeHandler(daemon.ProcessBarcodeRead)
+
 	// Set Helios event callback and client
 	heliosClient.SetEventCallback(daemon.handleHeliosEvent)
 	sessionMgr.SetHeliosClient(heliosClient)
+
+	// Set CRT event callback and initialize
+	crtClient.SetEventCallback(daemon.handleCRTIdentification)
+	if cfg.CRTServiceActive {
+		if crtClient.Init() {
+			fmt.Println("CRT (Vizir) service initialized")
+		} else {
+			fmt.Println("CRT (Vizir) service initialization failed")
+		}
+	}
 
 	return daemon
 }
@@ -230,6 +276,11 @@ func (d *Daemon) idleProc() {
 
 	// Process SPHINX auto-ping
 	d.processSphinxAutoPing()
+
+	// Process CRT (Vizir) polling
+	if d.crtClient != nil {
+		d.crtClient.IdleProc()
+	}
 }
 
 // processJSPAutoPing processes JSP auto-ping for connections
@@ -1035,6 +1086,20 @@ func (d *Daemon) ProcessTagRead(connKey string, uid string, readerType uint8, au
 		return
 	}
 
+	// Check gmclist (global card deny list) FIRST
+	uidHex := strings.ToUpper(uid)
+	if d.cardList != nil {
+		if msg := d.cardList.CheckGlobal(uidHex); msg != "" {
+			d.logger.Info(fmt.Sprintf("Card deny (gmclist): uid=%s, message=%s", uidHex, msg))
+			if conn.Settings.Type == types.TTYPE_POCKET {
+				interactivePayload := pocket.CreateInteractivePacket(msg, 3000, 4, true)
+				pkt := pocket.CreatePacket(pocket.POCKET_CMD_INTERACTIVE, 0x00, interactivePayload)
+				d.pool.Send(connKey, pkt)
+			}
+			return
+		}
+	}
+
 	// Check MEMREG deny (block access if storage has value)
 	if conn.Settings.MemRegDeny != "" {
 		memregStorage := utils.GetMemRegStorage()
@@ -1093,6 +1158,19 @@ func (d *Daemon) ProcessTagRead(connKey string, uid string, readerType uint8, au
 		}
 	}
 
+	// Check mclist (secondary card deny list)
+	if d.cardList != nil {
+		if msg := d.cardList.CheckSecondary(uidHex); msg != "" {
+			d.logger.Info(fmt.Sprintf("Card deny (mclist): uid=%s, message=%s", uidHex, msg))
+			if conn.Settings.Type == types.TTYPE_POCKET {
+				interactivePayload := pocket.CreateInteractivePacket(msg, 3000, 4, true)
+				pkt := pocket.CreatePacket(pocket.POCKET_CMD_INTERACTIVE, 0x00, interactivePayload)
+				d.pool.Send(connKey, pkt)
+			}
+			return
+		}
+	}
+
 	// Start new access session
 	session, err := d.sessionMgr.StartSession(uid, connKey, "MAIN", lockers)
 	if err != nil {
@@ -1106,9 +1184,53 @@ func (d *Daemon) ProcessTagRead(connKey string, uid string, readerType uint8, au
 			rfidData["temp_card"] = true
 		}
 	}
-	if err != nil {
-		d.logger.Error(fmt.Sprintf("Failed to start session for UID %s: %v", uid, err))
-		return
+
+	// Check for GAT Solar (TTYPE_TIME) data
+	if extra := conn.Settings.Extra; extra != nil {
+		if gatType, ok := extra["gat_terminal_type"].(uint8); ok && gatType == gat.GAT_TTYPE_TIME {
+			solarData := map[string]interface{}{
+				"terminal_type": gatType,
+			}
+			if solarTime, ok := extra["gat_solar_time"].(int); ok {
+				solarData["time"] = solarTime
+			}
+			if price, ok := extra["gat_solar_price"].(int); ok {
+				solarData["price"] = price
+			}
+			if vendor, ok := extra["gat_solar_vendor"].(int); ok {
+				solarData["vendor"] = vendor
+			}
+			solarData["reg_query"] = conn.Settings.RegQuery
+			session.Data["gat_solar"] = solarData
+
+			d.logger.Info(fmt.Sprintf("GAT Solar session: uid=%s, time=%v", uid, solarData["time"]))
+
+			// Log GTime event
+			if d.gtimeLogger != nil {
+				gtimeData := map[string]string{
+					"timestamp": time.Now().Format("02.01.06 15:04:05"),
+					"id":        conn.Settings.ID,
+					"addres":    fmt.Sprintf("%s:%d", conn.IP, conn.Port),
+					"type":      "Solar",
+					"uid":       uidHex,
+				}
+				if st, ok := solarData["time"].(int); ok {
+					gtimeData["time"] = fmt.Sprintf("%d", st)
+				}
+				if price, ok := solarData["price"].(int); ok {
+					gtimeData["price"] = fmt.Sprintf("%d", price)
+				}
+				if err := d.gtimeLogger.RegisterEvent(gtimeData); err != nil {
+					d.logger.Warn(fmt.Sprintf("GTime log error: %v", err))
+				}
+			}
+
+			// Clear after use
+			delete(extra, "gat_terminal_type")
+			delete(extra, "gat_solar_time")
+			delete(extra, "gat_solar_price")
+			delete(extra, "gat_solar_vendor")
+		}
 	}
 
 	d.logger.Info(fmt.Sprintf("Started session %s for UID %s", session.ID, uid))
@@ -1130,6 +1252,56 @@ func getMemRegDenyMessage(storage string) string {
 		return msg
 	}
 	return "СНИМИТЕ\nОТМЕТКУ"
+}
+
+// ProcessBarcodeRead processes barcode/QR code read event
+func (d *Daemon) ProcessBarcodeRead(connKey string, data string) {
+	d.logger.Info(fmt.Sprintf("Barcode read: conn=%s, data=%s", connKey, data))
+
+	// Get connection
+	conn := d.pool.GetConnection(connKey)
+	if conn == nil || conn.Settings == nil {
+		d.logger.Warn(fmt.Sprintf("Connection not found or settings missing: %s", connKey))
+		return
+	}
+
+	// Validate barcode data (must be 4-32 digits)
+	if len(data) < 1 || len(data) > 32 {
+		d.logger.Warn(fmt.Sprintf("Barcode data invalid length from %s: %d", connKey, len(data)))
+		return
+	}
+
+	// Start session with barcode data
+	session, err := d.sessionMgr.StartSession(data, connKey, "MAIN", nil)
+	if err != nil {
+		d.logger.Error(fmt.Sprintf("Failed to start barcode session: %v", err))
+		return
+	}
+
+	// Mark session as barcode type
+	session.Data["barcode"] = map[string]interface{}{
+		"reader_type":      0,
+		"reader_type_name": "BARCODE",
+		"data":             data,
+	}
+	session.Data["is_barcode"] = true
+	session.Data["tag_type"] = "qr"
+
+	// Send waiting interactive message to terminal
+	if conn.Settings.Type == types.TTYPE_POCKET {
+		waitPayload := pocket.CreateInteractivePacket("Подождите...", 7000, 0, true)
+		pkt := pocket.CreatePacket(pocket.POCKET_CMD_INTERACTIVE, 0x00, waitPayload)
+		d.pool.Send(connKey, pkt)
+	}
+
+	d.logger.Info(fmt.Sprintf("Started barcode session %s for data=%s on %s", session.ID, data, connKey))
+
+	// Send event to web interface
+	d.sendEvent("barcode_read", map[string]interface{}{
+		"session_id": session.ID,
+		"data":       data,
+		"conn_key":   connKey,
+	})
 }
 
 // handleHeliosEvent handles Helios WebSocket events
@@ -1238,6 +1410,110 @@ func (d *Daemon) handleHeliosEvent(request *helios.HeliosRequest, eventType heli
 	request.Processed = true
 }
 
+// validateFaceIDData validates face ID person data
+// In PHP this was dmnh_faceid_read_try_deny (disabled, but validates PID format 3-15 digits)
+func validateFaceIDData(pid string) (bool, string) {
+	pid = strings.TrimSpace(pid)
+	if len(pid) < 3 || len(pid) > 15 {
+		return false, "Лицо\nне распознано"
+	}
+	// Check that PID contains only digits
+	for _, c := range pid {
+		if c < '0' || c > '9' {
+			return false, "Лицо\nне распознано"
+		}
+	}
+	return true, ""
+}
+
+// handleCRTIdentification handles CRT person identification event
+func (d *Daemon) handleCRTIdentification(terminalID string, personID string, fio string, camID string, score float64, data map[string]interface{}) {
+	d.logger.Info(fmt.Sprintf("CRT identification: terminal=%s, person=%s, fio=%s, cam=%s, score=%.2f", terminalID, personID, fio, camID, score))
+
+	// Validate FaceID PID data
+	if valid, errMsg := validateFaceIDData(personID); !valid {
+		d.logger.Warn(fmt.Sprintf("CRT: invalid FaceID PID=%s: %s", personID, errMsg))
+		return
+	}
+
+	// Find connection by terminal ID
+	var connKey string
+	connections := d.pool.GetConnections()
+	for key, conn := range connections {
+		if conn.Settings != nil && conn.Settings.ID == terminalID {
+			connKey = key
+			break
+		}
+	}
+
+	if connKey == "" {
+		d.logger.Warn(fmt.Sprintf("CRT: terminal %s not found in connections", terminalID))
+		return
+	}
+
+	conn := d.pool.GetConnection(connKey)
+	if conn == nil || conn.Settings == nil {
+		d.logger.Warn(fmt.Sprintf("CRT: connection %s not found", connKey))
+		return
+	}
+
+	// Check if there's already an active session for this connection
+	sessions := d.sessionMgr.GetAllSessions()
+	for _, s := range sessions {
+		if s.Key == connKey && !s.Processed && !s.Completed {
+			d.logger.Info(fmt.Sprintf("CRT: session already active for terminal %s, skipping", terminalID))
+			return
+		}
+	}
+
+	// Create FaceID session
+	session, err := d.sessionMgr.StartSession(personID, connKey, "MAIN", nil)
+	if err != nil {
+		d.logger.Error(fmt.Sprintf("CRT: failed to start session: %v", err))
+		return
+	}
+
+	// Set FaceID data in session
+	session.Data["faceid"] = map[string]interface{}{
+		"reader_type":      16,
+		"reader_type_name": "MAIN",
+		"pid":              personID,
+		"fio":              fio,
+		"cam_id":           camID,
+		"data":             personID,
+		"crt":              data,
+	}
+
+	// If crt_no_kpo_pass: auto-grant access without KPO check
+	if d.config.CRTNoKpoPass {
+		msg := strings.TrimSpace(fio) + ", " + crt.FormatScore(score)
+		if len(msg) < 3 {
+			msg = d.config.ServiceFixedMsg
+		}
+
+		session.Data["kpo"] = map[string]interface{}{
+			"result":          types.KPO_RES_YES,
+			"message":         msg,
+			"kpo_answer_data": "autofix",
+		}
+		session.Stage = types.SESSION_STAGE_KPO_RESULT
+		session.Data["ap_mode"] = true
+		session.Data["no_report"] = true
+	}
+
+	d.logger.Info(fmt.Sprintf("CRT: session %s created for person %s on terminal %s", session.ID, personID, terminalID))
+
+	// Send event to web interface
+	d.sendEvent("crt_identification", map[string]interface{}{
+		"session_id":  session.ID,
+		"terminal_id": terminalID,
+		"person_id":   personID,
+		"fio":         fio,
+		"cam_id":      camID,
+		"score":       score,
+	})
+}
+
 // ProcessPassEvent processes person passed event
 func (d *Daemon) ProcessPassEvent(connKey string, passed bool) {
 	d.logger.Info(fmt.Sprintf("Pass event: conn=%s, passed=%v", connKey, passed))
@@ -1255,6 +1531,15 @@ func (d *Daemon) ProcessPassEvent(connKey string, passed bool) {
 			} else if session.Stage == types.SESSION_STAGE_OPEN_SECOND {
 				session.Data["passed_second"] = passed
 				d.sessionMgr.ProcessSessionStage(session.ID) // Trigger stage processing
+			}
+
+			// CRT: set ban after pass if applicable
+			if passed && d.crtClient != nil {
+				if faceData, ok := session.Data["faceid"].(map[string]interface{}); ok {
+					camID, _ := faceData["cam_id"].(string)
+					pid, _ := faceData["pid"].(string)
+					d.crtClient.TryBanAfterPass(camID, pid)
+				}
 			}
 			break
 		}
@@ -1318,6 +1603,16 @@ func (d *Daemon) startWebServer() error {
 	mux.HandleFunc("/api/logs", d.handleAPILogs)
 	mux.HandleFunc("/api/config", d.handleAPIConfig)
 	mux.HandleFunc("/api/events", d.handleAPIEvents) // SSE для real-time обновлений
+	mux.HandleFunc("/api/cardlist", d.handleAPICardList)
+	mux.HandleFunc("/api/cardlist/", d.handleAPICardList)
+	mux.HandleFunc("/api/system/halt", d.handleAPIHalt)
+	mux.HandleFunc("/api/system/settings", d.handleAPISettings)
+	mux.HandleFunc("/api/system/settings/", d.handleAPISettings)
+	mux.HandleFunc("/api/terminals/add", d.handleAPITerminalsAdd)
+	mux.HandleFunc("/api/terminals/del", d.handleAPITerminalsDel)
+	mux.HandleFunc("/api/terminals/check", d.handleAPITerminalsCheck)
+	mux.HandleFunc("/api/tlogs", d.handleAPITermLogs)
+	mux.HandleFunc("/api/tlogs/", d.handleAPITermLogs)
 
 	// Create server
 	d.webServer = &http.Server{

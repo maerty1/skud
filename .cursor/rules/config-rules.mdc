@@ -1,0 +1,30 @@
+---
+description: "Rules for config.json and configuration handling"
+globs: "config/**"
+alwaysApply: false
+---
+
+# Конфигурация
+
+## Структура config.json
+
+Основные секции:
+- `server` — TCP-сервер (addr, port)
+- `web` — Web-интерфейс (addr, port, enabled)
+- `http_service` — подключение к 1С
+- `timeouts` — таймауты сессий и запросов
+- `error_handling` — retry, сообщения ошибок
+- `messages` — шаблоны сообщений на дисплей
+- `helios` — WebSocket камера Helios
+- `crt` — CRT Vizir видео-распознавание
+- `phrases_fixes` — коррекция фраз на дисплее
+- `term_list` — список терминалов
+- `logging` — настройки логирования
+
+## Правила при изменении конфигурации
+
+1. Добавь поле в `ConfigFile` struct в `config/config.go`
+2. Добавь маппинг в `LoadConfig()` — из JSON в `types.Config`
+3. Добавь значение по умолчанию в `SaveConfigExample()`
+4. Обнови `config/config.json` пример
+5. Если нужен доступ через API — добавь в `handleAPISettings` в `web_api.go`

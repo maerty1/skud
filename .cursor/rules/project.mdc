@@ -1,0 +1,70 @@
+---
+description: "Основное правило проекта nd-go (СКУД)"
+alwaysApply: true
+---
+
+# Проект nd-go — Система контроля доступа (СКУД)
+
+## Обзор
+
+Go-версия системы контроля доступа, портированная с PHP (`../nd/`). Модуль: `nd-go`, Go 1.25.
+Единственная зависимость: `github.com/gorilla/websocket`.
+
+## Архитектура
+
+```
+cmd/main.go                    — точка входа, CLI-аргументы
+config/config.go               — загрузка конфигурации (JSON + ENV + CLI)
+internal/
+  daemon/daemon.go             — центральный демон, оркестрация
+  daemon/web_api.go            — REST API обработчики
+  daemon/web_ui.go             — Web UI + SSE
+  connection/pool.go           — TCP connection pool к терминалам
+  connection/memreg.go         — memory register
+  session/manager.go           — управление сессиями (stage-based FSM)
+  httpclient/client.go         — HTTP клиент к 1С (retry, таймауты)
+  helios/client.go             — WebSocket клиент Helios (камера)
+  crt/client.go                — CRT Vizir видео-распознавание
+  cardlist/cardlist.go         — deny-списки карт (gmclist/mclist)
+  gtime/gtime.go               — CSV-логирование GAT Solar
+  termlogs/termlogs.go         — per-terminal event logs + пагинация
+  csvlogger/csvlogger.go       — основное CSV-логирование
+  logging/logger.go            — логгер
+  handler/manager.go           — обработчики
+  protocols/
+    gat/protocol.go            — протокол GAT
+    pocket/protocol.go         — протокол POCKET
+    pocket/lock.go             — управление замками
+    sphinx/protocol.go         — протокол SPHINX
+    jsp/protocol.go            — протокол JSP
+pkg/
+  types/types.go               — общие типы, константы, конфигурация
+  utils/utils.go               — утилиты (FixPhrase и др.)
+  utils/memreg.go              — memory register utils
+  utils/lockers.go             — locker utils
+  protopack/protopack.go       — TLV бинарная сериализация (совместимость с PHP)
+```
+
+## Ключевые принципы
+
+- **Конкурентность**: `sync.RWMutex` для общих структур данных, горутины для TCP-соединений
+- **Интерфейсы**: Каждый модуль определяет интерфейсы зависимостей (HTTPClientInterface, HeliosClientInterface, ConnectionPoolInterface)
+- **Конфигурация**: `types.Config` — основная структура, загружается из JSON, может быть дополнена ENV/CLI
+- **Сессии**: Stage-based FSM (`SESSION_STAGE_*` в types.go), обрабатываются SessionManager
+- **Протоколы**: GAT, POCKET, SPHINX, JSP — каждый в своём пакете
+- **Логирование**: CSV-формат для событий доступа, файловый логгер
+
+## Стиль кода
+
+- Язык комментариев: русский или английский (допускаются оба)
+- Имена переменных/функций: английский, Go conventions (camelCase для приватных, PascalCase для экспортируемых)
+- Константы: UPPER_SNAKE_CASE с префиксом модуля (SESSION_STAGE_, TTYPE_, REQ_TAG_)
+- Обработка ошибок: стандартный Go-паттерн `if err != nil { return err }`
+- Каждый пакет в `internal/` — самодостаточный модуль с минимальными зависимостями
+
+## Справочная информация
+
+- PHP-оригинал расположен в `C:\Users\e.shabalin\Desktop\skud\nd`
+- Sigur-версия (другая СКУД) в `C:\Users\e.shabalin\Desktop\skud\sigur`
+- Используй PHP-код как референс при портировании/отладке
+- Конфигурационный файл: `config/config.json`

@@ -83,7 +83,21 @@ type ConfigFile struct {
 		Timeout float64 `json:"timeout"`
 	} `json:"helios"`
 	PhrasesFixes map[string]string `json:"phrases_fixes"` // message corrections for terminal display
-	CRT          struct {
+	Storage struct {
+		SqlitePath string `json:"sqlite_path"` // if set, use SQLite instead of CSV (e.g. "./data/skud.db")
+	} `json:"storage"`
+	Email struct {
+		Enabled    bool     `json:"enabled"`
+		Host       string   `json:"host"`
+		Port       int      `json:"port"`
+		User       string   `json:"user"`
+		Password   string   `json:"password"`
+		From       string   `json:"from"`
+		Recipients []string `json:"recipients"`
+		SendTimes  []string `json:"send_times"` // daily send at these times, "HH:MM" (e.g. ["08:00", "20:00"])
+		Subject    string   `json:"subject"`    // subject template, e.g. "СКД отчёт за %s"
+	} `json:"email"`
+	CRT struct {
 		Active             bool              `json:"active"`
 		IdentificationMode bool              `json:"identification_mode"`
 		IP                 string            `json:"ip"`
@@ -243,6 +257,13 @@ func getDefaultConfig() *types.Config {
 		LogRotationMaxSize:  int64(getEnvInt("LOG_ROTATION_MAX_SIZE", 10*1024*1024)),
 		LogRotationMaxFiles: getEnvInt("LOG_ROTATION_MAX_FILES", 10),
 		LogRotationMaxDays:  getEnvInt("LOG_ROTATION_MAX_DAYS", 30),
+		StorageSqlitePath:   "",
+		EmailEnabled:        false,
+		EmailHost:           "",
+		EmailPort:           587,
+		EmailFrom:           "",
+		EmailSubject:        "СКД отчёт за %s",
+		EmailSendTimes:      []string{"08:00"},
 		Stats:               map[string]interface{}{"start_time": time.Now()},
 		IDGen:               0,
 		Connections:         make(map[string]*types.Connection),
@@ -438,6 +459,34 @@ func loadConfigFromFile(path string, cfg *types.Config) error {
 		cfg.CRTCamLinks = fileCfg.CRT.CamLinks
 	}
 
+	// Storage
+	if fileCfg.Storage.SqlitePath != "" {
+		cfg.StorageSqlitePath = fileCfg.Storage.SqlitePath
+	}
+
+	// Email
+	cfg.EmailEnabled = fileCfg.Email.Enabled
+	if fileCfg.Email.Host != "" {
+		cfg.EmailHost = fileCfg.Email.Host
+	}
+	if fileCfg.Email.Port > 0 {
+		cfg.EmailPort = fileCfg.Email.Port
+	}
+	cfg.EmailUser = fileCfg.Email.User
+	cfg.EmailPassword = fileCfg.Email.Password
+	if fileCfg.Email.From != "" {
+		cfg.EmailFrom = fileCfg.Email.From
+	}
+	if len(fileCfg.Email.Recipients) > 0 {
+		cfg.EmailRecipients = fileCfg.Email.Recipients
+	}
+	if len(fileCfg.Email.SendTimes) > 0 {
+		cfg.EmailSendTimes = fileCfg.Email.SendTimes
+	}
+	if fileCfg.Email.Subject != "" {
+		cfg.EmailSubject = fileCfg.Email.Subject
+	}
+
 	return nil
 }
 
@@ -555,6 +604,16 @@ func SaveConfigExample(path string) error {
 	example.CRT.NoKpoPass = true
 	example.CRT.SeenTimeout = 10.0
 	example.CRT.CamLinks = map[string]string{}
+	example.Storage.SqlitePath = "./data/skud.db"
+	example.Email.Enabled = false
+	example.Email.Host = "smtp.example.com"
+	example.Email.Port = 587
+	example.Email.User = ""
+	example.Email.Password = ""
+	example.Email.From = "skud@example.com"
+	example.Email.Recipients = []string{"admin@example.com"}
+	example.Email.SendTimes = []string{"08:00", "20:00"}
+	example.Email.Subject = "СКД отчёт за %s"
 
 	data, err := json.MarshalIndent(example, "", "  ")
 	if err != nil {

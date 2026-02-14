@@ -18,7 +18,9 @@ import (
 	"nd-go/internal/protocols/pocket"
 	"nd-go/internal/protocols/sphinx"
 	"nd-go/internal/session"
+	"nd-go/internal/storage"
 	"nd-go/internal/termlogs"
+	"nd-go/internal/email"
 	"nd-go/pkg/types"
 	"nd-go/pkg/utils"
 	"net"
@@ -46,6 +48,7 @@ type Daemon struct {
 	termLogs     *termlogs.TermLogs
 	sessionMgr   *session.SessionManager
 	csvLogger    *csvlogger.CSVLogger
+	storageStore *storage.SQLiteStore
 	running      bool
 	mutex        sync.RWMutex
 	server       *net.TCPListener
@@ -96,10 +99,26 @@ func NewDaemonWithConfig(configPath string, cmdArgs map[string]string) *Daemon {
 	sessionMgr.SetPool(pool)
 	fmt.Println("Session manager created")
 
-	fmt.Println("Creating CSV logger...")
-	csvLogger := csvlogger.NewCSVLogger("./csv/")
-	sessionMgr.SetCSVLogger(csvLogger)
-	fmt.Println("CSV logger created and set")
+	var csvLogger *csvlogger.CSVLogger
+	var storageStore *storage.SQLiteStore
+	if cfg.StorageSqlitePath != "" {
+		fmt.Println("Creating SQLite storage...")
+		storageStore = storage.NewSQLiteStore(cfg.StorageSqlitePath)
+		if err := storageStore.Open(); err != nil {
+			fmt.Printf("Warning: SQLite storage open failed: %v, falling back to CSV\n", err)
+			storageStore = nil
+			csvLogger = csvlogger.NewCSVLogger("./csv/")
+			sessionMgr.SetCSVLogger(csvLogger)
+		} else {
+			sessionMgr.SetCSVLogger(storageStore)
+			fmt.Println("SQLite storage created and set")
+		}
+	} else {
+		fmt.Println("Creating CSV logger...")
+		csvLogger = csvlogger.NewCSVLogger("./csv/")
+		sessionMgr.SetCSVLogger(csvLogger)
+		fmt.Println("CSV logger created and set")
+	}
 
 	fmt.Println("Creating Helios client...")
 	heliosClient := helios.NewHeliosClient(cfg)
@@ -116,9 +135,12 @@ func NewDaemonWithConfig(configPath string, cmdArgs map[string]string) *Daemon {
 	termLogsStore := termlogs.NewTermLogs(cfg.LogEventCount)
 	fmt.Println("Term logs created")
 
-	fmt.Println("Creating GTime logger...")
-	gtimeLogger := gtime.NewGTimeLogger(cfg.LogFile+"_gtime/", gtime.DefaultKeys())
-	fmt.Println("GTime logger created")
+	var gtimeLogger *gtime.GTimeLogger
+	if storageStore == nil {
+		fmt.Println("Creating GTime logger (CSV)...")
+		gtimeLogger = gtime.NewGTimeLogger(cfg.LogFile+"_gtime/", gtime.DefaultKeys())
+		fmt.Println("GTime logger created")
+	}
 
 	fmt.Println("Creating card list...")
 	cardListMgr := cardlist.NewCardList()
@@ -141,6 +163,7 @@ func NewDaemonWithConfig(configPath string, cmdArgs map[string]string) *Daemon {
 		termLogs:     termLogsStore,
 		sessionMgr:   sessionMgr,
 		csvLogger:    csvLogger,
+		storageStore: storageStore,
 		running:      false,
 		shutdownCh:   make(chan bool),
 		startTime:    time.Now(),
@@ -225,6 +248,9 @@ func (d *Daemon) Stop() {
 	}
 
 	d.pool.Close()
+	if d.storageStore != nil {
+		d.storageStore.Close()
+	}
 	d.logger.Close()
 
 	close(d.shutdownCh)
@@ -281,6 +307,67 @@ func (d *Daemon) idleProc() {
 	if d.crtClient != nil {
 		d.crtClient.IdleProc()
 	}
+
+	// Email digest at configured times
+	d.trySendEmailDigest()
+}
+
+// trySendEmailDigest sends email digest at configured times (e.g. 08:00, 20:00).
+func (d *Daemon) trySendEmailDigest() {
+	if !d.config.EmailEnabled || len(d.config.EmailRecipients) == 0 || d.config.EmailHost == "" {
+		return
+	}
+	if d.storageStore == nil {
+		return
+	}
+	now := time.Now()
+	currentSlot := now.Format("15:04")
+	for _, slot := range d.config.EmailSendTimes {
+		if slot != currentSlot {
+			continue
+		}
+		// Avoid sending twice in the same minute
+		if now.Sub(d.config.EmailLastSent) < 2*time.Minute {
+			return
+		}
+		// Send digest: sessions since last send (or last 24h if first time)
+		since := d.config.EmailLastSent
+		if since.IsZero() {
+			since = now.Add(-24 * time.Hour)
+		}
+		rows, err := d.storageStore.GetSessionsSince(since)
+		if err != nil {
+			d.logger.Warn(fmt.Sprintf("Email digest: get sessions: %v", err))
+			return
+		}
+		var body strings.Builder
+		body.WriteString(fmt.Sprintf("Отчёт СКД за период с %s по %s.\n\n", since.Format("02.01.2006 15:04"), now.Format("02.01.2006 15:04")))
+		body.WriteString(fmt.Sprintf("Всего событий: %d\n\n", len(rows)))
+		for _, r := range rows {
+			body.WriteString(fmt.Sprintf("%s | %s | %s | %s | %s | %s | %s\n",
+				getStr(r, "session_time"), getStr(r, "term_id"), getStr(r, "uid"), getStr(r, "kpo_result"), getStr(r, "final_result"), getStr(r, "final_msg"), getStr(r, "term_addr")))
+		}
+		subject := d.config.EmailSubject
+		if subject == "" {
+			subject = "СКД отчёт за %s"
+		}
+		subject = fmt.Sprintf(subject, now.Format("02.01.2006 15:04"))
+		if err := email.Send(d.config.EmailHost, d.config.EmailPort, d.config.EmailUser, d.config.EmailPassword,
+			d.config.EmailFrom, d.config.EmailRecipients, subject, body.String()); err != nil {
+			d.logger.Warn(fmt.Sprintf("Email digest send: %v", err))
+			return
+		}
+		d.config.EmailLastSent = now
+		d.logger.Info(fmt.Sprintf("Email digest sent to %v", d.config.EmailRecipients))
+		return
+	}
+}
+
+func getStr(m map[string]string, k string) string {
+	if s, ok := m[k]; ok {
+		return s
+	}
+	return ""
 }
 
 // processJSPAutoPing processes JSP auto-ping for connections
@@ -1205,21 +1292,25 @@ func (d *Daemon) ProcessTagRead(connKey string, uid string, readerType uint8, au
 
 			d.logger.Info(fmt.Sprintf("GAT Solar session: uid=%s, time=%v", uid, solarData["time"]))
 
-			// Log GTime event
-			if d.gtimeLogger != nil {
-				gtimeData := map[string]string{
-					"timestamp": time.Now().Format("02.01.06 15:04:05"),
-					"id":        conn.Settings.ID,
-					"addres":    fmt.Sprintf("%s:%d", conn.IP, conn.Port),
-					"type":      "Solar",
-					"uid":       uidHex,
+			// Log GTime event (SQLite or CSV)
+			gtimeData := map[string]string{
+				"timestamp": time.Now().Format("02.01.06 15:04:05"),
+				"id":        conn.Settings.ID,
+				"addres":    fmt.Sprintf("%s:%d", conn.IP, conn.Port),
+				"type":      "Solar",
+				"uid":       uidHex,
+			}
+			if st, ok := solarData["time"].(int); ok {
+				gtimeData["time"] = fmt.Sprintf("%d", st)
+			}
+			if price, ok := solarData["price"].(int); ok {
+				gtimeData["price"] = fmt.Sprintf("%d", price)
+			}
+			if d.storageStore != nil {
+				if err := d.storageStore.RegisterGTimeEvent(gtimeData); err != nil {
+					d.logger.Warn(fmt.Sprintf("GTime (SQLite) log error: %v", err))
 				}
-				if st, ok := solarData["time"].(int); ok {
-					gtimeData["time"] = fmt.Sprintf("%d", st)
-				}
-				if price, ok := solarData["price"].(int); ok {
-					gtimeData["price"] = fmt.Sprintf("%d", price)
-				}
+			} else if d.gtimeLogger != nil {
 				if err := d.gtimeLogger.RegisterEvent(gtimeData); err != nil {
 					d.logger.Warn(fmt.Sprintf("GTime log error: %v", err))
 				}

@@ -304,6 +304,21 @@ type Config struct {
 
 	// Phrase fixes: message correction before sending to terminal display
 	PhrasesFixes map[string]string `json:"phrases_fixes"` // original -> corrected
+
+	// Storage: SQLite path (if set, replaces CSV for sessions and gtime)
+	StorageSqlitePath string `json:"storage_sqlite_path"`
+
+	// Email: digest sending
+	EmailEnabled    bool     `json:"email_enabled"`
+	EmailHost       string   `json:"email_host"`
+	EmailPort       int      `json:"email_port"`
+	EmailUser       string   `json:"email_user"`
+	EmailPassword   string   `json:"email_password"`
+	EmailFrom       string   `json:"email_from"`
+	EmailRecipients []string `json:"email_recipients"`
+	EmailSendTimes  []string `json:"email_send_times"` // "HH:MM"
+	EmailSubject    string   `json:"email_subject"`
+	EmailLastSent   time.Time `json:"-"` // last time we sent (to avoid duplicate in same slot)
 }
 
 // Protocol Packet
